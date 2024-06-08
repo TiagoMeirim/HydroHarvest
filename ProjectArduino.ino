@@ -2,35 +2,39 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
-#include <WiFi.h>
-
+#include <HTTPClient.h>
+#include <limits.h>
 WebServer server(80);
-//WiFiServer server(80);
 
 StaticJsonDocument<1024> jsonDocument;
 char buffer[1024];
 
 /* Change these values based on your calibration values */
 int lowerThreshold = 1300;
-int upperThreshold = 1850;
+int upperThreshold = 1600;
 
 float humidityLevel;
 float tankLevel;
 float lightLevel;
 float temperatureLevel;
+float humiditySum = 0;
+float tankLevelSum = 0;
+float lightLevelSum = 0;
+float temperatureSum = 0;
+int readingCount = 0;
 int watering;
 
 // Sensor pins
 #define sensorWaterPower 2
-#define sensorWaterPin 34
+#define sensorWaterPin 35
 #define sensorHumidityPower 0
-#define sensorHumidyPin 35
+#define sensorHumidyPin 34
 #define sensorLightPin 36
-#define sensorTemperaturePin 39 
+#define sensorTemperaturePin 39
 #define buttonPin 33
 #define relayPin 13
 
-bool lastState = false;
+int lastRelayState = HIGH;
 int currentState;
 
 int red = 25; //this sets the red led pin
@@ -40,19 +44,35 @@ int blue = 27; //this sets the blue led pin
 unsigned long measureDelay = 3000;                //    NOT LESS THAN 2000!!!!!   
 unsigned long lastTimeRan;
 
-IPAddress local_IP(192,168,1,124);
-IPAddress gateway(192,168,1,1);
-IPAddress subnet(255,255,255,0);
-IPAddress primaryDNS(8,8,8,8);
-IPAddress secondaryDNS(8,8,4,4);
-const char *ssid = "Thomson388369";
-const char *password = "347D8C3016";
+const char* ssid = "AutoConnect";
+const char* password = "password";
+
+unsigned int Actual_Millis, Previous_Millis;
+int refresh_time = 300000;
+
+int minHumidity = -1;
+int maxHumidity = INT_MAX;
+int minTemperature = -1;
+int maxTemperature = INT_MAX;
+
+int startTimeWattering;
+int endTimeWattering;
+
+int startMillis;
+
+bool hasSchedule = false;
+
+String plantation;
+
+IPAddress local_IP(192, 168, 1, 125);
+IPAddress gateway(192, 168, 1, 1);
+IPAddress subnet(255, 255, 0, 0);
+
 
 void setup() {
-  //Serial.begin(9600);
   // Serial port is activated
   Serial.begin(115200);
-  // This delay gives the chance to wait for a Serial Monitor     without blocking if none is found
+  // This delay gives the chance to wait for a Serial Monitor without blocking if none is found
   delay(1500); 
 
   // Manage the wifi connection
@@ -62,45 +82,31 @@ void setup() {
   //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wm;
 
-  // reset settings - wipe stored credentials for testing
-  // these are stored by the esp library
-  wm.resetSettings();
+  // wm.resetSettings();
 
-  // Automatically connect using saved credentials,
-  // if connection fails, it starts an access point with the specified name ( "AutoConnectAP"),
-  // if empty will auto generate SSID, if password is blank it will be anonymous AP (wm.autoConnect())
-  // then goes into a blocking loop awaiting configuration and will return success result
+
+  if (!WiFi.config(local_IP, gateway, subnet)) {
+    Serial.println("STA Failed to configure");
+  }
 
   bool res;
-  // res = wm.autoConnect(); // auto generated AP name from chipid
-  // res = wm.autoConnect("AutoConnectAP"); // anonymous ap
-  res = wm.autoConnect("AutoConnectAP","password"); // password protected ap
+  res = wm.autoConnect(ssid, password);
 
   if(!res) {
       Serial.println("Failed to connect");
       ESP.restart();
-  } 
-  else {
+  } else {
       //if you get here you have connected to the WiFi    
       Serial.println("Connected...yeey :)");
+      Serial.println(WiFi.localIP());
   }
 
-  if(!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
-  {
-    Serial.println("STA Failed to configure");
-  }
+  Actual_Millis = millis();               //Save time for refresh loop
+  Previous_Millis = Actual_Millis;
+
   setupApi();
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-
+  digitalWrite(relayPin, HIGH);
+  pinMode(relayPin, OUTPUT);
   pinMode(sensorWaterPower, OUTPUT);
   digitalWrite(sensorWaterPin, LOW);
   pinMode(sensorHumidityPower, OUTPUT);
@@ -111,47 +117,150 @@ void setup() {
   pinMode(red, OUTPUT);
   pinMode(green, OUTPUT);
   pinMode(blue, OUTPUT);
-  pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, HIGH);
 }
+
 
 void loop() {
   server.handleClient();
 
   if (millis() > lastTimeRan + measureDelay)  {
-    humidityLevel = readHumidityLevelSensor();
-    tankLevel = readWaterLevelSensor();
-    lightLevel = readLightLevelSensor();
-    temperatureLevel = readTemperatureLevelSensor();
+    readSensors();
+  }
 
-    lastTimeRan = millis();
-  }
   currentState = digitalRead(buttonPin);
-  if(currentState == LOW){
-    lastState = !lastState;
-    if(lastState){
-      digitalWrite(relayPin, LOW);
-    }
-    else {
-      digitalWrite(relayPin, HIGH);
-    }
+  if(currentState == LOW && lastRelayState == HIGH){
+    turnPumpOn();
   }
-  if (tankLevel >= 0 && tankLevel <= lowerThreshold) {
+  else if(currentState == LOW && lastRelayState == LOW) {
+    turnPumpOff();
+    hasSchedule = false;
+  }
+  int waterLevel = readWaterLevelSensor();
+  //Need to invert for when connected with battery
+  if (waterLevel >= 0 && waterLevel <= lowerThreshold) {
     analogWrite(red, 0);
     analogWrite(green, 255);
     analogWrite(blue, 255);
   }
-  else if (tankLevel > lowerThreshold && tankLevel <= upperThreshold) {
+  else if (waterLevel > lowerThreshold && waterLevel <= upperThreshold) {
     analogWrite(red, 0);
     analogWrite(green, 0);
     analogWrite(blue, 255);
   }
-  else if (tankLevel > upperThreshold) {
+  else if (waterLevel > upperThreshold) {
     analogWrite(red, 255);
     analogWrite(green, 0);
     analogWrite(blue, 255);
   }
+
+  /*if (waterLevel >= 0 && waterLevel <= lowerThreshold) {
+    analogWrite(red, 255);
+    analogWrite(green, 0);
+    analogWrite(blue, 0);
+  }
+  else if (waterLevel > lowerThreshold && waterLevel <= upperThreshold) {
+    analogWrite(red, 255);
+    analogWrite(green, 255);
+    analogWrite(blue, 0);
+  }
+  else if (waterLevel > upperThreshold) {
+    analogWrite(red, 0);
+    analogWrite(green, 255);
+    analogWrite(blue, 0);
+  }*/
+
+  Actual_Millis = millis();
+  if(Actual_Millis - Previous_Millis > refresh_time){
+    Previous_Millis = Actual_Millis;  
+    if(WiFi.status() == WL_CONNECTED){
+      HTTPClient http;
+
+      //Begin new connection to website       
+      http.begin("http://20.170.64.240:8080/ubiquitous/addData"); // Will get the millis for the watering
+      http.addHeader("Content-Type", "application/json");
+
+      getValuesHTTP();
+
+      int response_code = http.POST(buffer);
+      
+      //If response body -1 dont water
+
+      //If the code is higher than 0, it means we received a response
+      if(response_code > 0){
+        Serial.println("HTTP code " + String(response_code));
+        if(response_code == 202){
+          String response_body = http.getString();
+          StaticJsonDocument<1024> doc;
+          DeserializationError error = deserializeJson(doc, response_body);
+          if (error) {
+            Serial.print("deserializeJson() failed: ");
+            Serial.println(error.c_str());
+            return;
+          }
+          startTimeWattering = doc["start"];
+          endTimeWattering = doc["end"];
+          if(startTimeWattering > -1 || endTimeWattering > -1){
+            hasSchedule = true;
+            startMillis = millis();
+          }
+        }
+      }
+      else{
+       Serial.print("Error sending POST, code: ");
+       Serial.println(response_code);
+      }
+      http.end();
+    }
+    else{
+      Serial.println("WIFI connection error");
+      executeWhileOffline();
+    }
+  }
+
+  if(hasSchedule){
+    if(millis() - startMillis >= startTimeWattering && millis() - startMillis <= endTimeWattering){
+      turnPumpOn();
+    } else {
+      turnPumpOff();
+      hasSchedule = false;
+    }
+  }
+
   delay(1000);
+}
+
+void executeWhileOffline(){// Problem should this be like turn pump on for 10 seconds?
+  if(humidityLevel<minHumidity || humidityLevel>maxHumidity)
+    turnPumpOn();
+  else
+    turnPumpOff();
+}
+
+void turnPumpOn(){
+  digitalWrite(relayPin, LOW);
+  lastRelayState = LOW;
+}
+
+void turnPumpOff(){
+  digitalWrite(relayPin, HIGH);
+  lastRelayState = HIGH;
+}
+
+void readSensors(){
+  humidityLevel = readHumidityLevelSensor();
+  tankLevel = readWaterLevelSensor();
+  lightLevel = readLightLevelSensor();
+  temperatureLevel = readTemperatureLevelSensor();
+  Serial.println(humidityLevel);
+  Serial.println(tankLevel);
+  Serial.println(lightLevel);
+  Serial.println(temperatureLevel);
+  humiditySum += humidityLevel;
+  tankLevelSum += tankLevel;
+  lightLevelSum += lightLevel;
+  temperatureSum += temperatureLevel;
+  readingCount++;
+  lastTimeRan = millis();
 }
 
 float readWaterLevelSensor() {
@@ -159,7 +268,6 @@ float readWaterLevelSensor() {
   delay(10);
   int val = analogRead(sensorWaterPin);
   digitalWrite(sensorWaterPower, LOW);
-  //Serial.println(val);
   return val;
 }
 
@@ -168,23 +276,21 @@ float readHumidityLevelSensor() {
   delay(10);
   int val = analogRead(sensorHumidyPin);
   digitalWrite(sensorHumidityPower, LOW);
-  //Serial.println(val);
   return val;
 }
 
 float readLightLevelSensor() {
   int val = analogRead(sensorLightPin);
-  //Serial.println(val);
-  return val;
+  return calculateLightPercentage(val);
+}
+
+float calculateLightPercentage(int sensorValue){
+  return (sensorValue / 4095.0) * 100.0;
 }
 
 float readTemperatureLevelSensor() {
-  float val = analogRead(sensorTemperaturePin);
-  /*Serial.print("Temperature: ");
-  Serial.print(calculateTemperature(val));
-  Serial.println(" °C");*/
-  float temp = calculateTemperature(val);
-  return temp;
+  int val = analogRead(sensorTemperaturePin);
+  return calculateTemperature(val);
 }
 
 // Function to calculate temperature in Celsius
@@ -198,26 +304,14 @@ float calculateTemperature(int tempVal) {
 
 
 void handleStartWatering() {
-  if (server.hasArg("plain") == false) {
-    //handle error here
-  }
-  String body = server.arg("plain");
-  deserializeJson(jsonDocument, body);
-  
-  watering = jsonDocument["watering"];
-  digitalWrite(relayPin, LOW);
+  turnPumpOn();
+
   // Respond to the client
   server.send(200, "application/json", "{}");
 }
 
 void handleStopWatering() {
-  if (server.hasArg("plain") == false) {
-    //handle error here
-  }
-  String body = server.arg("plain");
-  deserializeJson(jsonDocument, body);
-  digitalWrite(relayPin, HIGH);
-  watering = jsonDocument["watering"];
+  turnPumpOff();
 
   // Respond to the client
   server.send(200, "application/json", "{}");
@@ -231,8 +325,8 @@ void createJson(char *name, float value, char *unit) {
   serializeJson(jsonDocument, buffer);  
 }
  
-void addJsonObject(char *name, float value, char *unit) {
-  JsonObject obj = jsonDocument.createNestedObject();
+void addJsonObject(JsonArray& array, char *name, float value, char *unit) {
+  JsonObject obj = array.createNestedObject();
   obj["name"] = name;
   obj["value"] = value;
   obj["unit"] = unit; 
@@ -241,21 +335,101 @@ void addJsonObject(char *name, float value, char *unit) {
 void getValues() {
   Serial.println("Get all values");
   jsonDocument.clear(); // Clear json buffer
-  addJsonObject("humidityLevel", humidityLevel, "%");
-  addJsonObject("tankLevel", tankLevel * 100.0 / 1800.0  , "%");
-  addJsonObject("lightLevel", lightLevel * 100.0 / 4000.0, "%");
-  addJsonObject("temperatureLevel", temperatureLevel, "ºC");
+  jsonDocument["ip"] = WiFi.localIP();
+  JsonArray sensors = jsonDocument.createNestedArray("sensors");
+  humidityLevel = humiditySum/readingCount;
+  tankLevel = tankLevelSum/readingCount;
+  lightLevel = lightLevelSum/readingCount;
+  temperatureLevel = temperatureSum/readingCount;
+  addJsonObject(sensors, "humidityLevel", humidityLevel, "%");
+  addJsonObject(sensors, "tankLevel", tankLevel, "%");
+  addJsonObject(sensors, "lightLevel", lightLevel, "%");
+  addJsonObject(sensors, "temperatureLevel", temperatureLevel, "°C");
 
   serializeJson(jsonDocument, buffer);
   server.send(200, "application/json", buffer);
+}
+
+char* getValuesHTTP() {
+  Serial.println("Get all values");
+  jsonDocument.clear(); // Clear json buffer
+  jsonDocument["ip"] = WiFi.localIP();
+  JsonArray sensors = jsonDocument.createNestedArray("sensors");
+  humidityLevel = humiditySum/readingCount;
+  humiditySum = 0;
+  tankLevel = tankLevelSum/readingCount;
+  tankLevelSum = 0;
+  lightLevel = lightLevelSum/readingCount;
+  lightLevelSum = 0;
+  temperatureLevel = temperatureSum/readingCount;
+  temperatureSum = 0;
+  readingCount = 0;
+  addJsonObject(sensors, "humidityLevel", humidityLevel, "%");
+  addJsonObject(sensors, "tankLevel", tankLevel, "%");
+  addJsonObject(sensors, "lightLevel", lightLevel, "%");
+  addJsonObject(sensors, "temperatureLevel", temperatureLevel, "°C");
+
+  serializeJson(jsonDocument, buffer);
+  return buffer;
+}
+
+void setPlantation(){
+
+  if (server.hasArg("plain") == false) {
+    //handle error here
+  }
+  String body = server.arg("plain");
+  deserializeJson(jsonDocument, body);
+  
+  plantation = jsonDocument["plantation"].as<String>();
+
+  if(WiFi.status() == WL_CONNECTED){
+      HTTPClient http;
+
+      //Begin new connection to website       
+      http.begin("http://20.170.64.240:8080/ubiquitous/getInformation?plant=" + plantation); // Plantation name provided by the application
+      http.addHeader("Content-Type", "application/json");
+
+      int response_code = http.GET();
+      
+      //If response body -1 dont water
+
+      //If the code is higher than 0, it means we received a response
+      if(response_code > 0){
+        Serial.println("HTTP code " + String(response_code));
+        if(response_code == 202){
+          String response_body = http.getString();
+          StaticJsonDocument<1024> doc;
+          DeserializationError error = deserializeJson(doc, response_body);
+          if (error) {
+            Serial.print("deserializeJson() failed: ");
+            Serial.println(error.c_str());
+            return;
+          }
+          minHumidity = doc["minHumidity"];
+          maxHumidity = doc["maxHumidity"];
+          maxTemperature = doc["maxTemperature"];
+          minTemperature = doc["minTemperature"];
+        }
+      }
+      else{
+       Serial.print("Error sending GET, code: ");
+       Serial.println(response_code);
+      }
+      http.end();
+    }
+    else{
+      Serial.println("WIFI connection error");
+    }
 }
 
 void setupApi() {
   server.on("/getValues", getValues);
   server.on("/setStartWatering", HTTP_POST, handleStartWatering);
   server.on("/setStopWatering", HTTP_POST, handleStopWatering);
+  server.on("/setPlantation", HTTP_POST, setPlantation);
 
  
-  // start server
+  //start server
   server.begin();
 }
