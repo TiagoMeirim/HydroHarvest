@@ -48,7 +48,7 @@ const char* ssid = "AutoConnect";
 const char* password = "password";
 
 unsigned int Actual_Millis, Previous_Millis;
-int refresh_time = 300000;
+int refresh_time = 300000; //300000
 
 int minHumidity = -1;
 int maxHumidity = INT_MAX;
@@ -85,9 +85,9 @@ void setup() {
   // wm.resetSettings();
 
 
-  if (!WiFi.config(local_IP, gateway, subnet)) {
+  /*if (!WiFi.config(local_IP, gateway, subnet)) {
     Serial.println("STA Failed to configure");
-  }
+  }*/
 
   bool res;
   res = wm.autoConnect(ssid, password);
@@ -122,7 +122,6 @@ void setup() {
 
 void loop() {
   server.handleClient();
-
   if (millis() > lastTimeRan + measureDelay)  {
     readSensors();
   }
@@ -153,30 +152,14 @@ void loop() {
     analogWrite(blue, 255);
   }
 
-  /*if (waterLevel >= 0 && waterLevel <= lowerThreshold) {
-    analogWrite(red, 255);
-    analogWrite(green, 0);
-    analogWrite(blue, 0);
-  }
-  else if (waterLevel > lowerThreshold && waterLevel <= upperThreshold) {
-    analogWrite(red, 255);
-    analogWrite(green, 255);
-    analogWrite(blue, 0);
-  }
-  else if (waterLevel > upperThreshold) {
-    analogWrite(red, 0);
-    analogWrite(green, 255);
-    analogWrite(blue, 0);
-  }*/
-
   Actual_Millis = millis();
   if(Actual_Millis - Previous_Millis > refresh_time){
     Previous_Millis = Actual_Millis;  
     if(WiFi.status() == WL_CONNECTED){
       HTTPClient http;
 
-      //Begin new connection to website       
-      http.begin("http://20.170.64.240:8080/ubiquitous/addData"); // Will get the millis for the watering
+      //Begin new connection to website
+      http.begin("http://4.182.99.186:8080/ubiquitous/addData"); // Will get the millis for the watering
       http.addHeader("Content-Type", "application/json");
 
       getValuesHTTP();
@@ -197,11 +180,13 @@ void loop() {
             Serial.println(error.c_str());
             return;
           }
-          startTimeWattering = doc["start"];
-          endTimeWattering = doc["end"];
-          if(startTimeWattering > -1 || endTimeWattering > -1){
-            hasSchedule = true;
-            startMillis = millis();
+          if(!hasSchedule){
+            startTimeWattering = doc["start"];
+            endTimeWattering = doc["end"];
+            if(startTimeWattering > -1 || endTimeWattering > -1){
+              hasSchedule = true;
+              startMillis = millis();
+            }
           }
         }
       }
@@ -220,7 +205,7 @@ void loop() {
   if(hasSchedule){
     if(millis() - startMillis >= startTimeWattering && millis() - startMillis <= endTimeWattering){
       turnPumpOn();
-    } else {
+    } else if(millis() - startMillis > endTimeWattering){
       turnPumpOff();
       hasSchedule = false;
     }
@@ -230,7 +215,7 @@ void loop() {
 }
 
 void executeWhileOffline(){// Problem should this be like turn pump on for 10 seconds?
-  if(humidityLevel<minHumidity || humidityLevel>maxHumidity)
+  if(humidityLevel<minHumidity)
     turnPumpOn();
   else
     turnPumpOff();
@@ -251,12 +236,12 @@ void readSensors(){
   tankLevel = readWaterLevelSensor();
   lightLevel = readLightLevelSensor();
   temperatureLevel = readTemperatureLevelSensor();
-  Serial.println(humidityLevel);
+  /*Serial.println(humidityLevel);
   Serial.println(tankLevel);
   Serial.println(lightLevel);
-  Serial.println(temperatureLevel);
+  Serial.println(temperatureLevel);*/
   humiditySum += humidityLevel;
-  tankLevelSum += tankLevel;
+  tankLevelSum += tankLevel*100/2000;
   lightLevelSum += lightLevel;
   temperatureSum += temperatureLevel;
   readingCount++;
@@ -375,9 +360,9 @@ char* getValuesHTTP() {
 
 void setPlantation(){
 
-  if (server.hasArg("plain") == false) {
+  /*if (server.hasArg("plain") == false) {
     //handle error here
-  }
+  }*/
   String body = server.arg("plain");
   deserializeJson(jsonDocument, body);
   
@@ -387,8 +372,7 @@ void setPlantation(){
       HTTPClient http;
 
       //Begin new connection to website       
-      http.begin("http://20.170.64.240:8080/ubiquitous/getInformation?plant=" + plantation); // Plantation name provided by the application
-      http.addHeader("Content-Type", "application/json");
+      http.begin("http://4.182.99.186:8080/ubiquitous/getInformation?plant=" + plantation); // Plantation name provided by the application
 
       int response_code = http.GET();
       
@@ -421,6 +405,7 @@ void setPlantation(){
     else{
       Serial.println("WIFI connection error");
     }
+    server.send(200, "application/json", "{}");
 }
 
 void setupApi() {
