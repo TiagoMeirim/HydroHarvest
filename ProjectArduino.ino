@@ -61,6 +61,7 @@ int endTimeWattering;
 int startMillis;
 
 bool hasSchedule = false;
+bool executeOffline = false;
 
 String plantation;
 
@@ -156,6 +157,7 @@ void loop() {
   if(Actual_Millis - Previous_Millis > refresh_time){
     Previous_Millis = Actual_Millis;  
     if(WiFi.status() == WL_CONNECTED){
+      executeOffline = false;
       HTTPClient http;
 
       //Begin new connection to website
@@ -198,7 +200,7 @@ void loop() {
     }
     else{
       Serial.println("WIFI connection error");
-      executeWhileOffline();
+      executeOffline = true;
     }
   }
 
@@ -209,6 +211,8 @@ void loop() {
       turnPumpOff();
       hasSchedule = false;
     }
+  } else if(executeOffline){
+    executeWhileOffline();
   }
 
   delay(1000);
