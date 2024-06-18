@@ -10,8 +10,8 @@ StaticJsonDocument<1024> jsonDocument;
 char buffer[1024];
 
 /* Change these values based on your calibration values */
-int lowerThreshold = 1300;
-int upperThreshold = 1600;
+int lowerThreshold = 1250;
+int upperThreshold = 1750;
 
 float humidityLevel;
 float tankLevel;
@@ -26,9 +26,9 @@ int watering;
 
 // Sensor pins
 #define sensorWaterPower 2
-#define sensorWaterPin 35
+#define sensorWaterPin 34
 #define sensorHumidityPower 0
-#define sensorHumidyPin 34
+#define sensorHumidyPin 35
 #define sensorLightPin 36
 #define sensorTemperaturePin 39
 #define buttonPin 33
@@ -127,15 +127,8 @@ void loop() {
     readSensors();
   }
 
-  currentState = digitalRead(buttonPin);
-  if(currentState == LOW && lastRelayState == HIGH){
-    turnPumpOn();
-  }
-  else if(currentState == LOW && lastRelayState == LOW) {
-    turnPumpOff();
-    hasSchedule = false;
-  }
   int waterLevel = readWaterLevelSensor();
+  Serial.println(waterLevel);
   //Need to invert for when connected with battery
   if (waterLevel >= 0 && waterLevel <= lowerThreshold) {
     analogWrite(red, 0);
@@ -153,6 +146,15 @@ void loop() {
     analogWrite(blue, 255);
   }
 
+  currentState = digitalRead(buttonPin);
+  if(currentState == LOW && lastRelayState == HIGH){
+    turnPumpOn();
+  }
+  else if(currentState == LOW && lastRelayState == LOW) {
+    turnPumpOff();
+    hasSchedule = false;
+  }
+
   Actual_Millis = millis();
   if(Actual_Millis - Previous_Millis > refresh_time){
     Previous_Millis = Actual_Millis;  
@@ -161,7 +163,7 @@ void loop() {
       HTTPClient http;
 
       //Begin new connection to website
-      http.begin("http://4.182.99.186:8080/ubiquitous/addData"); // Will get the millis for the watering
+      http.begin("http://4.182.14.86:8080/ubiquitous/addData"); // Will get the millis for the watering
       http.addHeader("Content-Type", "application/json");
 
       getValuesHTTP();
@@ -232,8 +234,10 @@ void executeWhileOffline(){// Problem should this be like turn pump on for 10 se
 }
 
 void turnPumpOn(){
-  digitalWrite(relayPin, LOW);
-  lastRelayState = LOW;
+  //if(readWaterLevelSensor() < 900){
+    digitalWrite(relayPin, LOW);
+    lastRelayState = LOW;
+  //}
 }
 
 void turnPumpOff(){
@@ -250,7 +254,7 @@ void readSensors(){
   Serial.println(tankLevel);
   Serial.println(lightLevel);
   Serial.println(temperatureLevel);*/
-  humiditySum += humidityLevel;
+  humiditySum += humidityLevel*100/4095;
   tankLevelSum += tankLevel*100/2000;
   lightLevelSum += lightLevel;
   temperatureSum += temperatureLevel;
@@ -258,7 +262,7 @@ void readSensors(){
   lastTimeRan = millis();
 }
 
-float readWaterLevelSensor() {
+int readWaterLevelSensor() {
   digitalWrite(sensorWaterPower, HIGH);
   delay(10);
   int val = analogRead(sensorWaterPin);
@@ -266,7 +270,7 @@ float readWaterLevelSensor() {
   return val;
 }
 
-float readHumidityLevelSensor() {
+int readHumidityLevelSensor() {
   digitalWrite(sensorHumidityPower, HIGH);
   delay(10);
   int val = analogRead(sensorHumidyPin);
@@ -382,7 +386,7 @@ void setPlantation(){
       HTTPClient http;
 
       //Begin new connection to website       
-      http.begin("http://4.182.99.186:8080/ubiquitous/getInformation?plant=" + plantation); // Plantation name provided by the application
+      http.begin("http://4.182.14.86:8080/ubiquitous/getInformation?plant=" + plantation); // Plantation name provided by the application
 
       int response_code = http.GET();
       
